@@ -1,0 +1,164 @@
+pipeline {
+  agent any
+
+  environment {
+    SCANNER_HOME   = tool 'sonar-scanner'
+    BACKEND_IMAGE  = "yashdubey455/wanderlust-backend"
+    FRONTEND_IMAGE = "yashdubey455/wanderlust-frontend"
+  }
+
+  stages {
+
+    stage('Clean Workspace') {
+      steps {
+        cleanWs()
+      }
+    }
+
+    stage('Checkout Code') {
+      steps {
+        git branch: 'main',
+            url: 'https://github.com/Yashdubey455/Wanderlust-Mega-Project.git',
+            credentialsId: 'Github-cred'
+      }
+    }
+
+    stage('SonarQube Analysis') {
+      steps {
+        withSonarQubeEnv('sonar-server') {
+          sh '''
+            $SCANNER_HOME/bin/sonar-scanner \
+              -Dsonar.projectKey=wanderlust \
+              -Dsonar.projectName=Wanderlust \
+              -Dsonar.sources=.
+          '''
+        }
+      }
+    }
+
+    stage('Quality Gate (NON-BLOCKING)') {
+      steps {
+        script {
+          def qg = waitForQualityGate()
+          echo "SonarQube Quality Gate status: ${qg.status}"
+          echo "Pipeline continues regardless of Quality Gate result"
+        }
+      }
+    }
+
+    stage('Install Dependencies') {
+      steps {
+        dir('backend') {
+          sh '''
+            if [ -f package.json ]; then
+              npm install
+            else
+              echo "No backend package.json found"
+            fi
+          '''
+        }
+
+        dir('frontend') {
+          sh '''
+            if [ -f package.json ]; then
+              npm install
+            else
+              echo "No frontend package.json found"
+            fi
+          '''
+        }
+      }
+    }
+
+    stage('OWASP Dependency Check') {
+      steps {
+        withCredentials([string(credentialsId: 'NVD_API_KEY', variable: 'NVD_API_KEY')]) {
+          sh '''
+            docker run --rm \
+              -e NVD_API_KEY=$NVD_API_KEY \
+              -v $WORKSPACE:/src \
+              -v /var/lib/jenkins/odc-data:/usr/share/dependency-check/data \
+              owasp/dependency-check:latest \
+              --project Wanderlust \
+              --scan /src/backend/package-lock.json \
+              --scan /src/frontend/package-lock.json \
+              --format HTML \
+              --out /src/dependency-check-report \
+              --disableNodeAudit \
+              --disableYarnAudit || true
+          '''
+        }
+      }
+    }
+
+    stage('Trivy File System Scan') {
+      steps {
+        sh '''
+          trivy fs backend  > trivy-backend-fs.txt  || true
+          trivy fs frontend > trivy-frontend-fs.txt || true
+        '''
+      }
+    }
+
+    stage('Build Docker Images') {
+      steps {
+        dir('backend') {
+          sh '''
+            docker build -t $BACKEND_IMAGE:$BUILD_NUMBER .
+            docker tag $BACKEND_IMAGE:$BUILD_NUMBER $BACKEND_IMAGE:latest
+          '''
+        }
+
+        dir('frontend') {
+          sh '''
+            docker build -t $FRONTEND_IMAGE:$BUILD_NUMBER .
+            docker tag $FRONTEND_IMAGE:$BUILD_NUMBER $FRONTEND_IMAGE:latest
+          '''
+        }
+      }
+    }
+
+    stage('Trivy Image Scan') {
+      steps {
+        sh '''
+          trivy image $BACKEND_IMAGE:$BUILD_NUMBER  > trivy-backend-image.txt  || true
+          trivy image $FRONTEND_IMAGE:$BUILD_NUMBER > trivy-frontend-image.txt || true
+        '''
+      }
+    }
+
+    stage('Push Docker Images') {
+      steps {
+        withDockerRegistry(credentialsId: 'docker', url: 'https://index.docker.io/v1/') {
+          sh '''
+            docker push $BACKEND_IMAGE:$BUILD_NUMBER
+            docker push $BACKEND_IMAGE:latest
+
+            docker push $FRONTEND_IMAGE:$BUILD_NUMBER
+            docker push $FRONTEND_IMAGE:latest
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      echo "Sending build notification email..."
+
+      emailext attachLog: true,
+        subject: "Build ${currentBuild.currentResult}: ${env.JOB_NAME}",
+        body: """
+        <h2>Wanderlust CI Pipeline Notification</h2>
+        <p><b>Project:</b> ${env.JOB_NAME}</p>
+        <p><b>Build Number:</b> ${env.BUILD_NUMBER}</p>
+        <p><b>Status:</b> ${currentBuild.currentResult}</p>
+        <p><b>Build URL:</b>
+           <a href="${env.BUILD_URL}">${env.BUILD_URL}</a>
+        </p>
+        """,
+        to: "yashdubey455@gmail.com",
+        attachmentsPattern: "trivy-*.txt"
+    }
+  }
+}
