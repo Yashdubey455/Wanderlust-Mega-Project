@@ -1,0 +1,97 @@
+pipeline {
+    agent any
+
+    environment {
+        FRONTEND_IMAGE = 'yashdubey455/wanderlust-frontend:latest'
+        BACKEND_IMAGE  = 'yashdubey455/wanderlust-backend:latest'
+    }
+
+    stages {
+
+        stage('Clean Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout Repository') {
+            steps {
+                git branch: 'main',
+                    url: 'https://github.com/Yashdubey455/Wanderlust-Mega-Project.git',
+                    credentialsId: 'Github-cred'
+            }
+        }
+
+        stage('Show Image Tags') {
+            steps {
+                echo "Frontend Image : ${env.FRONTEND_IMAGE}"
+                echo "Backend Image  : ${env.BACKEND_IMAGE}"
+            }
+        }
+
+        stage('Update Kubernetes Manifests') {
+            steps {
+                dir('kubernetes') {
+
+                    sh """
+                    sed -i 's|image:.*wanderlust-backend.*|image: ${BACKEND_IMAGE}|g' backend.yaml
+                    """
+
+                    sh """
+                    sed -i 's|image:.*wanderlust-frontend.*|image: ${FRONTEND_IMAGE}|g' frontend.yaml
+                    """
+                }
+            }
+        }
+
+        stage('Commit & Push Changes') {
+            steps {
+                withCredentials([
+                    gitUsernamePassword(
+                        credentialsId: 'Github-cred',
+                        gitToolName: 'Default'
+                    )
+                ]) {
+                    sh """
+                    git status
+                    git add .
+                    git commit -m "chore(cd): deploy wanderlust latest images"
+                    git push origin main
+                    """
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            emailext(
+                attachLog: true,
+                to: 'Yashdubey455@gmail.com',
+                subject: "✅ Wanderlust Deployment Successful | Build #${BUILD_NUMBER}",
+                body: """
+                <h3 style="color:green;">Wanderlust Deployed Successfully</h3>
+                <p><b>Job:</b> ${JOB_NAME}</p>
+                <p><b>Build:</b> ${BUILD_NUMBER}</p>
+                <p><b>Frontend:</b> ${FRONTEND_IMAGE}</p>
+                <p><b>Backend:</b> ${BACKEND_IMAGE}</p>
+                <p><b>URL:</b> <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+                """
+            )
+        }
+
+        failure {
+            emailext(
+                attachLog: true,
+                to: 'Yashdubey455@gmail.com',
+                subject: "❌ Wanderlust Deployment Failed | Build #${BUILD_NUMBER}",
+                body: """
+                <h3 style="color:red;">Wanderlust Deployment Failed</h3>
+                <p><b>Job:</b> ${JOB_NAME}</p>
+                <p><b>Build:</b> ${BUILD_NUMBER}</p>
+                <p><b>URL:</b> <a href="${BUILD_URL}">${BUILD_URL}</a></p>
+                """
+            )
+        }
+    }
+}
